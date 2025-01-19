@@ -1,133 +1,59 @@
-import type { AuthProvider } from "@refinedev/core";
+import type { GraphQLFormattedError } from "graphql";
 
-import type { User } from "@/graphql/schema.types";
-
-import { API_URL, dataProvider } from "./data";
-
-/**
- * For demo purposes and to make it easier to test the app, you can use the following credentials:
- */
-export const authCredentials = {
-  email: "michael.scott@dundermifflin.com",
-  password: "demodemo",
+type Error = {
+  message: string;
+  statusCode: string;
 };
 
-export const authProvider: AuthProvider = {
-  login: async ({ email }) => {
-    try {
-      const { data } = await dataProvider.custom({
-        url: API_URL,
-        method: "post",
-        headers: {},
-        meta: {
-          variables: { email },
-          rawQuery: `
-                mutation Login($email: String!) {
-                    login(loginInput: {
-                      email: $email
-                    }) {
-                      accessToken,
-                    }
-                  }
-                `,
-        },
-      });
+const customFetch = async (url: string, options: RequestInit) => {
+  const accessToken = localStorage.getItem("access_token");
+  const headers = options.headers as Record<string, string>;
 
-      localStorage.setItem("access_token", data.login.accessToken);
+  return await fetch(url, {
+    ...options,
+    headers: {
+      ...headers,
+      Authorization: headers?.Authorization || `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      "Apollo-Require-Preflight": "true",
+    },
+  });
+};
 
-      return {
-        success: true,
-        redirectTo: "/",
-      };
-    } catch (e) {
-      const error = e as Error;
+export const fetchWrapper = async (url: string, options: RequestInit) => {
+  const response = await customFetch(url, options);
 
-      return {
-        success: false,
-        error: {
-          message: "message" in error ? error.message : "Login failed",
-          name: "name" in error ? error.name : "Invalid email or password",
-        },
-      };
-    }
-  },
-  logout: async () => {
-    localStorage.removeItem("access_token");
+  const responseClone = response.clone();
+  const body = await responseClone.json();
+  const error = getGraphQLErrors(body);
+
+  if (error) {
+    throw error;
+  }
+
+  return response;
+};
+
+const getGraphQLErrors = (
+  body: Record<"errors", GraphQLFormattedError[] | undefined>,
+): Error | null => {
+  if (!body) {
+    return {
+      message: "Unknown error",
+      statusCode: "INTERNAL_SERVER_ERROR",
+    };
+  }
+
+  if ("errors" in body) {
+    const errors = body?.errors;
+    const messages = errors?.map((error) => error?.message)?.join("");
+    const code = errors?.[0]?.extensions?.code;
 
     return {
-      success: true,
-      redirectTo: "/login",
+      message: messages || JSON.stringify(errors),
+      statusCode: code || 500,
     };
-  },
-  onError: async (error) => {
-    if (error.statusCode === "UNAUTHENTICATED") {
-      return {
-        logout: true,
-      };
-    }
+  }
 
-    return { error };
-  },
-  check: async () => {
-    try {
-      await dataProvider.custom({
-        url: API_URL,
-        method: "post",
-        headers: {},
-        meta: {
-          rawQuery: `
-                    query Me {
-                        me {
-                          name
-                        }
-                      }
-                `,
-        },
-      });
-
-      return {
-        authenticated: true,
-        redirectTo: "/",
-      };
-    } catch (error) {
-      return {
-        authenticated: false,
-        redirectTo: "/login",
-      };
-    }
-  },
-  getIdentity: async () => {
-    const accessToken = localStorage.getItem("access_token");
-
-    try {
-      const { data } = await dataProvider.custom<{ me: User }>({
-        url: API_URL,
-        method: "post",
-        headers: accessToken
-          ? {
-              Authorization: `Bearer ${accessToken}`,
-            }
-          : {},
-        meta: {
-          rawQuery: `
-                    query Me {
-                        me {
-                            id,
-                            name,
-                            email,
-                            phone,
-                            jobTitle,
-                            timezone
-                            avatarUrl
-                        }
-                      }
-                `,
-        },
-      });
-
-      return data.me;
-    } catch (error) {
-      return undefined;
-    }
-  },
+  return null;
 };
